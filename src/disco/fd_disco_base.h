@@ -105,6 +105,7 @@ fd_disco_poh_sig( ulong slot,
 
 FD_FN_CONST static inline ulong fd_disco_poh_sig_pkt_type( ulong sig ) { return (sig & 0x3UL); }
 FD_FN_CONST static inline ulong fd_disco_poh_sig_slot( ulong sig ) { return (sig >> 8); }
+FD_FN_CONST static inline ulong fd_disco_poh_sig_flush( uint in_auction_cnt ) { return 0xFFFFFFFF00000000|in_auction_cnt; } // PEBBLE
 FD_FN_CONST static inline ulong fd_disco_poh_sig_execle_tile( ulong sig ) { return (sig >> 2) & 0x3FUL; }
 
 FD_FN_CONST static inline ulong
