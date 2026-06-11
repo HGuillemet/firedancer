@@ -1619,6 +1619,7 @@ fd_topo_configure_tile( fd_topo_tile_t * tile,
         FD_LOG_ERR(( "could not parse account %s at index %lu in [tiles.pack.account_blocklist]", config->tiles.pack.account_blocklist[i], i ));
       }
     }
+    tile->pack.auctions_per_slot             = config->tiles.pack.auctions_per_slot; // PEBBLE
 
     if( FD_UNLIKELY( config->tiles.bundle.enabled ) ) {
 
