@@ -434,6 +434,9 @@ struct fd_config {
       int  use_consumed_cus;
       char schedule_strategy[ 16 ];
       int  schedule_strategy_enum;
+      /* PEBBLE: 0 if syncing auction with Jito BE,
+         else number of auctions per slot. */
+      ulong auctions_per_slot;
     } pack;
 
     struct {

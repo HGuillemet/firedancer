@@ -466,6 +466,10 @@ struct fd_pack_private {
   ulong      cumulative_block_cost;
   ulong      cumulative_vote_cost;
 
+  /* PEBBLE: unlike cumulative_block_cost, doesn't include the CU
+     budgets of txs scheduled but not executed yet. */
+  ulong      cumulative_consumed;
+
   /* expire_before: Any transactions with expires_at strictly less than
      the current expire_before are removed from the available pending
      transaction.  Here, "expire" is used as a verb: cause all
@@ -759,6 +763,7 @@ fd_pack_new( void                   * mem,
   memset( pack->sched_results, 0, sizeof(pack->sched_results) );
   pack->rng                         = rng;
   pack->cumulative_block_cost       = 0UL;
+  pack->cumulative_consumed         = 0UL; // PEBBLE
   pack->cumulative_vote_cost        = 0UL;
   pack->expire_before               = 0UL;
   pack->outstanding_microblock_mask = 0UL;
@@ -1791,8 +1796,13 @@ typedef struct {
   ulong txns_scheduled;
   ulong bytes_scheduled;
   ulong alloc_scheduled;
+  /* PEBBLE: has_more_pending is true if at least one tx has been
+     skipped because of account contention. */
+  int   has_more_pending;
 } sched_return_t;
 
+/* PEBBLE: add argument max_arrival time_ns to only schedule txs arrived
+   before this time, and has_more_pending in returned struct. */
 static inline sched_return_t
 fd_pack_schedule_impl( fd_pack_t          * pack,
                        treap_t            * sched_from,
@@ -1803,7 +1813,9 @@ fd_pack_schedule_impl( fd_pack_t          * pack,
                        ulong                bank_tile,
                        fd_pack_smallest_t * smallest_in_treap,
                        ulong              * use_by_bank_txn,
-                       fd_txn_e_t         * out ) {
+                       fd_txn_e_t         * out,
+                       // PEBBLE: only schedule txs arrived before this time
+                       long                 max_arrival_time_ns ) {
 
   fd_pack_ord_txn_t  * pool         = pack->pool;
   fd_pack_addr_use_t * acct_in_use  = pack->acct_in_use;
@@ -1844,9 +1856,11 @@ fd_pack_schedule_impl( fd_pack_t          * pack,
   ulong min_bytes = ULONG_MAX;
 
   if( FD_UNLIKELY( (cu_limit<smallest_in_treap->cus) | (txn_limit==0UL) | (byte_limit<smallest_in_treap->bytes) ) ) {
-    sched_return_t to_return = { .cus_scheduled = 0UL, .txns_scheduled = 0UL, .bytes_scheduled = 0UL };
+    sched_return_t to_return = { 0 };
     return to_return;
   }
+
+  int has_more_pending = 0;
 
   treap_rev_iter_t prev = treap_idx_null();
   for( treap_rev_iter_t _cur=treap_rev_iter_init( sched_from, pool ); !treap_rev_iter_done( _cur ); _cur=prev ) {
@@ -1858,6 +1872,10 @@ fd_pack_schedule_impl( fd_pack_t          * pack,
 #   endif
 
     fd_pack_ord_txn_t * cur = treap_rev_iter_ele( _cur, pool );
+
+    if ( FD_LIKELY(cur->txn->scheduler_arrival_time_nanos > max_arrival_time_ns)) {
+      continue;
+    }
 
     min_cus   = fd_ulong_min( min_cus,   cur->compute_est     );
     min_bytes = fd_ulong_min( min_bytes, cur->txn->payload_sz );
@@ -1882,6 +1900,7 @@ fd_pack_schedule_impl( fd_pack_t          * pack,
     /* Likely? Unlikely? */
     if( FD_LIKELY( !FD_PACK_BITSET_INTERSECT4_EMPTY( bitset_rw_in_use, bitset_w_in_use, cur->w_bitset, cur->rw_bitset ) ) ) {
       fast_path++;
+      has_more_pending = 1;
       continue;
     }
 
@@ -1944,11 +1963,13 @@ fd_pack_schedule_impl( fd_pack_t          * pack,
       cur->skip = (ushort)(1+fd_ushort_min( (ushort)(compressed_slot_number-1),
                                             (ushort)(fd_ushort_min( cur->skip, FD_PACK_SKIP_CNT )-2) ) );
       write_limit_c++;
+      has_more_pending = 1;
       continue;
     }
 
     if( FD_UNLIKELY( conflicts ) ) {
       slow_path++;
+      has_more_pending = 1;
       continue;
     }
 
@@ -1966,6 +1987,7 @@ fd_pack_schedule_impl( fd_pack_t          * pack,
 
     if( FD_UNLIKELY( conflicts ) ) {
       slow_path++;
+      has_more_pending = 1;
       continue;
     }
 
@@ -2135,7 +2157,8 @@ fd_pack_schedule_impl( fd_pack_t          * pack,
   pack->written_list_cnt = written_list_cnt;
 
   sched_return_t to_return = { .cus_scheduled=cus_scheduled,     .txns_scheduled=txns_scheduled,
-                               .bytes_scheduled=bytes_scheduled, .alloc_scheduled=alloc_scheduled };
+                               .bytes_scheduled=bytes_scheduled, .alloc_scheduled=alloc_scheduled,
+                               .has_more_pending=has_more_pending };
   return to_return;
 }
 
@@ -2558,13 +2581,18 @@ fd_pack_try_schedule_bundle( fd_pack_t  * pack,
 }
 
 
-ulong
+/* PEBBLE: add argument max_arrival time_ns to only schedule txs arrived
+   before this time, and replace returned number of scheduled txs by a
+   struct containing information used to decide if the ongoing auction
+   should be stopped and when to flush shreds. */
+fd_pack_schedule_next_microblock_res_t
 fd_pack_schedule_next_microblock( fd_pack_t *  pack,
                                   ulong        total_cus,
                                   float        vote_fraction,
                                   ulong        bank_tile,
                                   int          schedule_flags,
-                                  fd_txn_e_t * out ) {
+                                  fd_txn_e_t * out,
+                                  long         max_arrival_time_ns ) {
 
   /* TODO: Decide if these are exactly how we want to handle limits */
   total_cus = fd_ulong_min( total_cus, pack->lim->max_cost_per_block - pack->cumulative_block_cost );
@@ -2574,13 +2602,15 @@ fd_pack_schedule_next_microblock( fd_pack_t *  pack,
                                            (ulong)((float)pack->lim->max_txn_per_microblock * vote_fraction) );
 
 
+  fd_pack_schedule_next_microblock_res_t retval = { 0 };
+
   if( FD_UNLIKELY( (pack->microblock_cnt>=pack->lim->max_microblocks_per_block) ) ) {
     FD_MCNT_INC( PACK, MICROBLOCK_PER_BLOCK_LIMIT, 1UL );
-    return 0UL;
+    return retval;
   }
   if( FD_UNLIKELY( pack->data_bytes_consumed+MICROBLOCK_DATA_OVERHEAD+FD_TXN_MIN_SERIALIZED_SZ>pack->lim->max_data_bytes_per_block) ) {
     FD_MCNT_INC( PACK, DATA_PER_BLOCK_LIMIT, 1UL );
-    return 0UL;
+    return retval;
   }
 
   ulong * use_by_bank_txn = pack->use_by_bank_txn[ bank_tile ];
@@ -2596,7 +2626,7 @@ fd_pack_schedule_next_microblock( fd_pack_t *  pack,
   if( FD_LIKELY( schedule_flags & FD_PACK_SCHEDULE_VOTE ) ) {
     /* Schedule vote transactions */
     status1= fd_pack_schedule_impl( pack, pack->pending_votes, vote_cus, vote_reserved_txns, byte_limit, alloc_limit, bank_tile,
-        pack->pending_votes_smallest, use_by_bank_txn, out+scheduled );
+        pack->pending_votes_smallest, use_by_bank_txn, out+scheduled, LONG_MAX );
 
     scheduled                   += status1.txns_scheduled;
     pack->cumulative_vote_cost  += status1.cus_scheduled;
@@ -2615,8 +2645,11 @@ fd_pack_schedule_next_microblock( fd_pack_t *  pack,
      didn't get any votes. */
   if( FD_UNLIKELY( !!(schedule_flags & FD_PACK_SCHEDULE_BUNDLE) & (status1.txns_scheduled==0UL) ) ) {
     int bundle_result = fd_pack_try_schedule_bundle( pack, bank_tile, out );
-    if( FD_UNLIKELY( bundle_result>0                         ) ) return (ulong)bundle_result;
-    if( FD_UNLIKELY( bundle_result==TRY_BUNDLE_HAS_CONFLICTS ) ) return 0UL;
+    if( FD_UNLIKELY( bundle_result>0 ) ) {
+      retval.schedule_cnt = (ulong)bundle_result;
+      return retval;
+    }
+    if (FD_UNLIKELY(bundle_result == TRY_BUNDLE_HAS_CONFLICTS)) return retval;
     /* in the NO_READY_BUNDLES or DOES_NOT_FIT case, we schedule like
        normal. */
     /* We have the early returns here because try_schedule_bundle does
@@ -2626,14 +2659,19 @@ fd_pack_schedule_next_microblock( fd_pack_t *  pack,
 
 
   /* Fill any remaining space with non-vote transactions */
-  if( FD_LIKELY( schedule_flags & FD_PACK_SCHEDULE_TXN ) ) {
-    status = fd_pack_schedule_impl( pack, pack->pending,       cu_limit, txn_limit,          byte_limit, alloc_limit, bank_tile,
-        pack->pending_smallest,       use_by_bank_txn, out+scheduled );
+  if( FD_LIKELY( ( schedule_flags & FD_PACK_SCHEDULE_TXN ) && txn_limit > 0 ) ) {
+    status = fd_pack_schedule_impl( pack, pack->pending, cu_limit, txn_limit, byte_limit, alloc_limit, bank_tile,
+        pack->pending_smallest, use_by_bank_txn, out+scheduled, max_arrival_time_ns );
 
-    scheduled                   += status.txns_scheduled;
     pack->cumulative_block_cost += status.cus_scheduled;
     pack->data_bytes_consumed   += status.bytes_scheduled;
     pack->alloc_consumed        += status.alloc_scheduled;
+    if( FD_LIKELY( status.txns_scheduled ) ) {
+      scheduled                 += status.txns_scheduled;
+      retval.in_auction = 1;
+    } else {
+      retval.auction_stop = !status.has_more_pending;
+    }
   }
 
   ulong nonempty = (ulong)(scheduled>0UL);
@@ -2652,11 +2690,13 @@ fd_pack_schedule_next_microblock( fd_pack_t *  pack,
   _mm_sfence();
 #endif
 
-  return scheduled;
+  retval.schedule_cnt = scheduled;
+  return retval;
 }
 
 ulong fd_pack_bank_tile_cnt     ( fd_pack_t const * pack ) { return pack->bank_tile_cnt;         }
 ulong fd_pack_current_block_cost( fd_pack_t const * pack ) { return pack->cumulative_block_cost; }
+ulong fd_pack_current_consumed  ( fd_pack_t const * pack ) { return pack->cumulative_consumed; } // PEBBLE
 
 
 void
@@ -2704,6 +2744,7 @@ fd_pack_rebate_cus( fd_pack_t              * pack,
   }
 
   pack->cumulative_block_cost  -= rebate->total_cost_rebate;
+  pack->cumulative_consumed    += rebate->total_consumed; // PEBBLE
   pack->cumulative_vote_cost   -= rebate->vote_cost_rebate;
   pack->data_bytes_consumed    -= rebate->data_bytes_rebate;
   pack->alloc_consumed         -= rebate->alloc_rebate;
@@ -2766,6 +2807,7 @@ fd_pack_end_block( fd_pack_t * pack ) {
   pack->microblock_cnt              = 0UL;
   pack->data_bytes_consumed         = 0UL;
   pack->cumulative_block_cost       = 0UL;
+  pack->cumulative_consumed         = 0UL; // PEBBLE
   pack->cumulative_vote_cost        = 0UL;
   pack->cumulative_rebated_cus      = 0UL;
   pack->outstanding_microblock_mask = 0UL;
@@ -2859,6 +2901,7 @@ fd_pack_clear_all( fd_pack_t * pack ) {
   pack->pending_txn_cnt        = 0UL;
   pack->microblock_cnt         = 0UL;
   pack->cumulative_block_cost  = 0UL;
+  pack->cumulative_consumed    = 0UL; // PEBBLE
   pack->cumulative_vote_cost   = 0UL;
   pack->cumulative_rebated_cus = 0UL;
   pack->data_bytes_consumed    = 0UL;

@@ -269,6 +269,9 @@ fd_pack_avail_txn_cnt( fd_pack_t const * pack ) {
    be a valid local join. */
 FD_FN_PURE ulong fd_pack_current_block_cost( fd_pack_t const * pack );
 
+/* PEBBLE: return the total amount of CU consumed by executed txs. */
+FD_FN_PURE ulong fd_pack_current_consumed( fd_pack_t const * pack );
+
 /* fd_pack_bank_tile_cnt: returns the value of bank_tile_cnt provided in
    pack when the pack object was initialized with fd_pack_new.  pack
    must be a valid local join.  The result will be in [1,
@@ -694,13 +697,30 @@ void fd_pack_set_initializer_bundles_ready( fd_pack_t * pack );
    bundle.  The return value may be 0 if there are no eligible
    transactions at the moment. */
 
-ulong
+struct fd_pack_schedule_next_microblock_res {
+   /* Total count of scheduled txs */
+   ulong schedule_cnt;
+   /* PEBBLE: true iif we tried to schedule a non-vote, non-bundled txs
+      AND there were none schedulable left
+      AND there were no txs schedulable but waiting for an account lock
+      to be released.
+      This is an indication that any ongoing auction should stop. */
+   int auction_stop;
+   /* PEBBLE: true iif we scheduled a non-vote, non-bundled txs,
+      (ie a tx that can only be packed during an auction).
+      Used to update `in_auction_cnt` to be sent in FLUSH requests. */
+   int in_auction;
+};
+typedef struct fd_pack_schedule_next_microblock_res fd_pack_schedule_next_microblock_res_t;
+
+fd_pack_schedule_next_microblock_res_t
 fd_pack_schedule_next_microblock( fd_pack_t  * pack,
                                   ulong        total_cus,
                                   float        vote_fraction,
                                   ulong        bank_tile,
                                   int          schedule_flags,
-                                  fd_txn_e_t * out );
+                                  fd_txn_e_t * out,
+                                  long         max_arrival_time_ns );
 
 
 /* fd_pack_rebate_cus adjusts the compute unit accounting for the
