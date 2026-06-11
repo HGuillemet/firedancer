@@ -1418,6 +1418,7 @@ fd_topo_configure_tile( fd_topo_tile_t * tile,
     tile->pack.larger_shred_limits_per_block = config->development.bench.larger_shred_limits_per_block;
     tile->pack.use_consumed_cus              = config->tiles.pack.use_consumed_cus;
     tile->pack.schedule_strategy             = config->tiles.pack.schedule_strategy_enum;
+    tile->pack.auctions_per_slot             = config->tiles.pack.auctions_per_slot; // PEBBLE
 
     if( FD_UNLIKELY( config->tiles.bundle.enabled ) ) {
 
