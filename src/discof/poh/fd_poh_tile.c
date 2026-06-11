@@ -42,6 +42,13 @@ struct fd_poh_tile {
   ulong in_cnt;
   ulong idle_cnt;
 
+  /* PEBBLE: when a FLUSH request is received from pack with a count of
+   in-auction txs, it is saved in in_auction_flush. Poh must send a
+   FLUSH request to shred when it has received from execle this count
+   of in-auction txs. */
+  uint in_auction_received;
+  uint in_auction_flush;
+
   int in_kind[ 64 ];
   fd_poh_in_t in[ 64 ];
 
@@ -144,6 +151,20 @@ returnable_frag( fd_poh_tile_t *     ctx,
     return 0;
   }
 
+  /* PEBBLE: when a FLUSH request is received from pack with a count of
+   in-auction microblocks, either publish a bare
+   flush request to shred if we already received from execle this
+   count of in-auction microblocks (unlikely), or store this count and
+   request later a flush when we receive this count of microblocks. */
+  if( FD_UNLIKELY( sig>=FD_PACK_MSG_FLUSH && ctx->in_kind[ in_idx ]==IN_KIND_PACK ) ) {
+    uint in_auction_cnt = (uint) sig; // & 0xFFFFFFFF
+    if ( FD_UNLIKELY( in_auction_cnt == ctx->in_auction_received ) )
+      publish_flush(ctx->poh, stem);
+    else if( FD_LIKELY( in_auction_cnt > ctx->in_auction_received ) )
+      ctx->in_auction_flush = in_auction_cnt; // Will flush later
+    return 0;
+  }
+
   if( FD_UNLIKELY( sig==REPLAY_SIG_WFS_DONE && ctx->in_kind[ in_idx ]==IN_KIND_REPLAY ) ) {
     fd_poh_wfs_done( ctx->poh );
     ctx->idle_cnt = 0UL;
@@ -176,7 +197,7 @@ returnable_frag( fd_poh_tile_t *     ctx,
      are going to have the wait for the full block to timeout once it
      starts. */
   if( FD_UNLIKELY( ctx->in_kind[ in_idx ]==IN_KIND_EXECLE && fd_poh_hashing_to_leader_slot( ctx->poh ) ) ) return 1;
-  if( FD_LIKELY( ctx->in_kind[ in_idx ]==IN_KIND_EXECLE || ctx->in_kind[ in_idx ]==IN_KIND_PACK ) ) {
+  if( FD_LIKELY( ctx->in_kind[ in_idx ]==IN_KIND_EXECLE || ( ctx->in_kind[ in_idx ]==IN_KIND_PACK && sig < FD_PACK_MSG_FLUSH ) ) ) {  // PEBBLE: not a FLUSH request
     uint pack_idx = (uint)fd_disco_execle_sig_pack_idx( sig );
     if( FD_UNLIKELY( ((int)(pack_idx-ctx->expect_pack_idx))<0L ) ) FD_LOG_ERR(( "received out of order pack_idx %u (expecting %u)", pack_idx, ctx->expect_pack_idx ));
     if( FD_UNLIKELY( pack_idx!=ctx->expect_pack_idx ) ) return 1;
@@ -206,7 +227,7 @@ returnable_frag( fd_poh_tile_t *     ctx,
       ulong txn_cnt = (sz-sizeof(fd_microblock_trailer_t))/sizeof(fd_txn_p_t);
       fd_txn_p_t const * txns = fd_chunk_to_laddr_const( ctx->in[ in_idx ].mem, chunk );
       fd_microblock_trailer_t const * trailer = fd_type_pun_const( (uchar const*)txns+sz-sizeof(fd_microblock_trailer_t) );
-      fd_poh1_mixin( ctx->poh, stem, target_slot, trailer->hash, txn_cnt, txns );
+      fd_poh1_mixin( ctx->poh, stem, target_slot, trailer->hash, txn_cnt, txns, trailer->in_auction );
       break;
     }
     default: {

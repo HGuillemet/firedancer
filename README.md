@@ -1,3 +1,38 @@
+# Pebble V1
+
+Pebble is an alternative scheduler for Frankendancer and Firedancer.
+
+The goal is to increase validator revenue compared to the default
+scheduler, while ensuring:
+
+* independence: no reliance on an external block builder,
+* compliance with SFDP requirements,
+* alignment with expected scheduling behavior under Constellation,
+* Jito compatibility, if desired.
+
+Unlike balanced strategy, or Agave greedy scheduler, non-vote
+and non-bundled transactions are only scheduled during periodic auctions
+(typically, every 45 or 50 ms).
+
+This kind of scheduler, called Frequent Batch Auctions (FBA) or Frequent
+Batch Ordering (FBO), requires transaction senders seeking fast
+inclusion to compete solely through priority fees, rather than:
+
+* trying to outpace others to reach the validator first, or
+* paying tips to one or more transaction landing services in the hope
+  that one of them will be able to deliver the transaction sooner, or
+  has contracted with the validator or its external block builder for 
+  some opaque prioritization.
+
+The key objective is therefore to restore the value of priority fees.
+
+For more technical details, see the comments in `default.toml` and
+in the source code
+
+The remainder of this file is the original Firedancer README.
+
+---
+
 # [Firedancer](https://jumpcrypto.com/firedancer/) 🔥💃
 
 Firedancer is a new validator client for Solana.
