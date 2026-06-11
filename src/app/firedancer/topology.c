@@ -1576,6 +1576,8 @@ fd_topo_configure_tile( fd_topo_tile_t * tile,
       }
     }
 
+    tile->pack.auctions_per_slot             = config->tiles.pack.auctions_per_slot; // PEBBLE
+
     if( FD_UNLIKELY( config->tiles.bundle.enabled ) ) {
 
       tile->pack.bundle.enabled = 1;
